@@ -5,7 +5,7 @@ Single-file solar plant monitoring dashboard. Pure HTML/CSS/JavaScript — no bu
 ## Live demo
 After deploying to GitHub Pages (see below), your dashboard will be available at:
 ```
-[https://<your-github-username>.github.io/<repo-name>/](https://peerapat-charoenkijmongcol.github.io/Solar-Monitoring-Platform/)
+(https://peerapat-charoenkijmongcol.github.io/Solar-Monitoring-Platform/)
 ```
 
 ## Features
