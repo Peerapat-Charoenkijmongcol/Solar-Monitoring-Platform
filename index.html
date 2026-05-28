@@ -3852,7 +3852,9 @@
           const mkw = parseFloat(r.meter_active_power_kw) || 0;
           const poa = parseFloat(r.irradiance_poa_w_m2) || 0;
           const tmod = parseFloat(r.module_temperature_tmod_c) || 0;
-          const scope = `snapshot/${pid}/2026-05-28 12:00:00`;
+          // Use snapshot_time from CSV (dynamic) — not hardcoded date
+          const snapTime = r.snapshot_time;
+          const scope = `snapshot/${pid}/${snapTime}`;
           computed[`${scope}|plant_total_ac_power_mw`] = +(ac/1000).toFixed(3);
           computed[`${scope}|plant_total_dc_power_mw`] = +(dc/1000).toFixed(3);
           computed[`${scope}|plant_efficiency_pct`] = dc>0 ? +(ac/dc*100).toFixed(2) : 0;
@@ -3909,20 +3911,24 @@
             computed[`${scope}|ambient_temperature_ta_avg_c`] = +T_a_avg.toFixed(1);
             computed[`${scope}|module_temperature_tmod_avg_c`] = +T_mod_avg.toFixed(1);
           });
-          // Event counts (use full timestamp ':00' to avoid string-compare fence-post)
-          const fault_intervals = ts.filter(r => r.timestamp >= '2026-05-28 09:15:00' && r.timestamp <= '2026-05-28 09:40:00' && r.inverter_status === 'Fault').length;
-          computed[`event/TH-296-SRF/2026-05-28|event_fault_intervals`] = fault_intervals;
-          // Imbalance intervals: compute string powers and check
-          const imb_intervals = ts.filter(r => {
-            if (r.timestamp < '2026-05-28 13:30:00' || r.timestamp > '2026-05-28 14:00:00') return false;
-            const v=[r.string_1_voltage_v,r.string_2_voltage_v,r.string_3_voltage_v,r.string_4_voltage_v].map(parseFloat);
-            const i=[r.string_1_current_a,r.string_2_current_a,r.string_3_current_a,r.string_4_current_a].map(parseFloat);
-            const p = v.map((vi,k) => vi*i[k]);
-            const mean = p.reduce((s,x)=>s+x,0)/4;
-            if (mean <= 0) return false;
-            return p.some(x => Math.abs(x-mean)/mean*100 > 20);
-          }).length;
-          computed[`event/TH-296-SRF/2026-05-28|event_imbalance_intervals`] = imb_intervals;
+          // Event counts — compute per-day (date-agnostic) so any expected_values date works
+          const tsDates = [...new Set(ts.map(r => r.timestamp.slice(0, 10)))];
+          tsDates.forEach(date => {
+            const dayRows = ts.filter(r => r.timestamp.slice(0, 10) === date);
+            // Fault intervals: count any rows on this day with inverter_status=Fault
+            const fault_count = dayRows.filter(r => r.inverter_status === 'Fault').length;
+            computed[`event/TH-296-SRF/${date}|event_fault_intervals`] = fault_count;
+            // Imbalance intervals: count rows where any string >20% off mean
+            let imb_count = 0;
+            dayRows.forEach(r => {
+              const v = [r.string_1_voltage_v, r.string_2_voltage_v, r.string_3_voltage_v, r.string_4_voltage_v].map(parseFloat);
+              const i = [r.string_1_current_a, r.string_2_current_a, r.string_3_current_a, r.string_4_current_a].map(parseFloat);
+              const p = v.map((vi, k) => vi * i[k]);
+              const mean = p.reduce((s, x) => s + x, 0) / 4;
+              if (mean > 0 && p.some(x => Math.abs(x - mean) / mean * 100 > 20)) imb_count++;
+            });
+            computed[`event/TH-296-SRF/${date}|event_imbalance_intervals`] = imb_count;
+          });
         }
 
         // -- Today's energy per plant from realtime snapshot (forward_active_energy_kwh - lifetime baseline) --
@@ -3932,7 +3938,7 @@
           const e_today = parseFloat(r.forward_active_energy_kwh) || 0;
           const tariff_v = tariff(pid);
           const cap_kwp = cap(pid);
-          const scope = `snapshot/${pid}/2026-05-28 12:00:00`;
+          const scope = `snapshot/${pid}/${r.snapshot_time}`;
           computed[`${scope}|todays_production_e_kwh`] = +(e_today - 5).toFixed(1); // remove the +5 offset
           computed[`${scope}|revenue_today_thb`] = +((e_today - 5) * tariff_v).toFixed(0);
           computed[`${scope}|co2_avoided_today_ton`] = +((e_today - 5) * C.GRID_EMISSION / 1000).toFixed(2);
@@ -3947,7 +3953,9 @@
         const total_e = op.reduce((s,r) => s + (parseFloat(r.forward_active_energy_kwh||0) - 5), 0) / 1000;
         const total_rev = op.reduce((s,r) => s + ((parseFloat(r.forward_active_energy_kwh||0) - 5) * tariff(r.plant_id)), 0);
         const total_cap = pc.reduce((s,p) => s + parseFloat(p.installed_capacity_mwp||0), 0);
-        const scopeT = 'snapshot/PLANT_TOTAL/2026-05-28 12:00:00';
+        // Use snapshot_time from first row as the scope date
+        const snapT0 = rt[0]?.snapshot_time || '';
+        const scopeT = `snapshot/PLANT_TOTAL/${snapT0}`;
         computed[`${scopeT}|overview_real_time_power_mw`] = +total_ac.toFixed(3);
         computed[`${scopeT}|overview_today_production_mwh`] = +total_e.toFixed(3);
         computed[`${scopeT}|overview_revenue_today_thb`] = +total_rev.toFixed(0);
@@ -4014,13 +4022,14 @@
           return t ? t.parentElement.querySelector('.kpi-value') : null;
         };
         const C = this.computed;
-        const total_ac = C['snapshot/PLANT_TOTAL/2026-05-28 12:00:00|overview_real_time_power_mw'] || 0;
-        const total_e = C['snapshot/PLANT_TOTAL/2026-05-28 12:00:00|overview_today_production_mwh'] || 0;
-        const total_rev = C['snapshot/PLANT_TOTAL/2026-05-28 12:00:00|overview_revenue_today_thb'] || 0;
-        const total_cap = C['snapshot/PLANT_TOTAL/2026-05-28 12:00:00|overview_installed_capacity_mwp'] || 0;
-        // PR, AF, CUF — capacity-weighted across operational plants
         const rt = this.data.realtimeSnapshot.rows;
         const pc = this.data.plantConfig.rows;
+        const snapT = rt[0]?.snapshot_time || '';   // dynamic snapshot date
+        const total_ac = C[`snapshot/PLANT_TOTAL/${snapT}|overview_real_time_power_mw`] || 0;
+        const total_e = C[`snapshot/PLANT_TOTAL/${snapT}|overview_today_production_mwh`] || 0;
+        const total_rev = C[`snapshot/PLANT_TOTAL/${snapT}|overview_revenue_today_thb`] || 0;
+        const total_cap = C[`snapshot/PLANT_TOTAL/${snapT}|overview_installed_capacity_mwp`] || 0;
+        // PR, AF, CUF — capacity-weighted across operational plants
         const op = rt.filter(r => r.system_status !== 'Offline');
         const wsum = (arr, valFn) => {
           let totW = 0, sum = 0;
@@ -4031,21 +4040,31 @@
           });
           return totW > 0 ? sum/totW : 0;
         };
-        const pr = wsum(op, r => {
-          const k = `snapshot/${r.plant_id}/2026-05-28 12:00:00|cuf_today_pct`;
-          // PR not directly per-plant in computed yet; use forward_active_energy + Ht estimate
-          return null; // fallback to anchor
+        // PR per plant — try to use computed daily PR from timeseries (TH-296-SRF only),
+        // or compute from forward_active_energy + estimated Ht for others
+        const tsDates = this.data.timeseries5min ? [...new Set(this.data.timeseries5min.rows.map(r => r.timestamp.slice(0,10)))] : [];
+        const latestDate = tsDates.length ? tsDates.sort().slice(-1)[0] : null;
+        const pr_per_plant = {};
+        if (latestDate && C[`daily/TH-296-SRF/${latestDate}|pr_pct`]) {
+          pr_per_plant['TH-296-SRF'] = C[`daily/TH-296-SRF/${latestDate}|pr_pct`];
+        }
+        // For other plants — estimate from forward_active_energy / (cap × typical Ht)
+        const typical_ht = pr_per_plant['TH-296-SRF']
+          ? C[`daily/TH-296-SRF/${latestDate}|daily_irradiation_ht_kwh_m2`]
+          : 7.5;
+        rt.forEach(r => {
+          if (pr_per_plant[r.plant_id] !== undefined) return;
+          const e_today = parseFloat(r.forward_active_energy_kwh) - 5;
+          const cap_v = parseFloat(pc.find(p=>p.plant_id===r.plant_id)?.installed_capacity_kwp) || 0;
+          if (cap_v > 0 && typical_ht > 0 && e_today > 0) {
+            pr_per_plant[r.plant_id] = (e_today / cap_v) / typical_ht * 100;
+          } else {
+            pr_per_plant[r.plant_id] = 0;
+          }
         });
-        // Anchor PR per plant (since we don't have full per-plant timeseries)
-        const anchor_pr = {'TH-296-SRF':78.5,'TH-104-GRD':79.8,'TH-217-RTF':77.2,'TH-088-FLT':80.6,'TH-331-AGR':0};
-        let totalWcap = 0, pr_weighted = 0;
-        op.forEach(r => {
-          const cap = parseFloat(pc.find(p=>p.plant_id===r.plant_id)?.installed_capacity_kwp) || 0;
-          if (cap > 0) { pr_weighted += (anchor_pr[r.plant_id]||0)*cap; totalWcap += cap; }
-        });
-        const pr_avg = totalWcap > 0 ? pr_weighted/totalWcap : 0;
-        const cuf_avg = wsum(op, r => C[`snapshot/${r.plant_id}/2026-05-28 12:00:00|cuf_today_pct`]);
-        const af_avg = (op.find(r => r.plant_id === 'TH-296-SRF') ? 94.8 : 100); // dominated by TH-296-SRF
+        const pr_avg = wsum(op, r => pr_per_plant[r.plant_id]);
+        const cuf_avg = wsum(op, r => C[`snapshot/${r.plant_id}/${r.snapshot_time}|cuf_today_pct`]);
+        const af_avg = (latestDate && C[`daily/TH-296-SRF/${latestDate}|af_pct`] !== undefined) ? C[`daily/TH-296-SRF/${latestDate}|af_pct`] : 100;
 
         this._bind(cardByTitle('Real-time Power'), `${total_ac.toFixed(2)}<span class="kpi-unit">MW</span>`, `(computed) Σ ac_active_power_kw÷1000 from realtime_snapshot|operational|MW|${total_ac.toFixed(3)}`);
         this._bind(cardByTitle("Today's Production"), `${total_e.toFixed(2)}<span class="kpi-unit">MWh</span>`, `(computed) Σ forward_active_energy÷1000|MWh|${total_e.toFixed(3)}`);
@@ -4060,7 +4079,7 @@
         const r = this.data.realtimeSnapshot.rows.find(x => x.plant_id === plantId); if (!r) return;
         const pc = this.data.plantConfig.rows.find(p => p.plant_id === plantId);
         const C = this.computed;
-        const scope = `snapshot/${plantId}/2026-05-28 12:00:00`;
+        const scope = `snapshot/${plantId}/${r.snapshot_time}`;
         const ac_mw = C[`${scope}|plant_total_ac_power_mw`];
         const e_today = C[`${scope}|todays_production_e_kwh`];
         const rev = C[`${scope}|revenue_today_thb`];
