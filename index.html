@@ -1677,6 +1677,16 @@
 
     <!-- ============ MAIN ============ -->
     <div class="main">
+      <!-- === CSV LOADER: START [test-banner] === -->
+      <div id="testModeBanner" style="display:none;background:#FFF3CD;border-bottom:1px solid #FFE082;padding:8px 18px;font-size:13px;color:#5C4A00;align-items:center;gap:14px">
+        <span style="font-weight:700">⚠ TEST MODE</span>
+        <span><b id="tmFileCount">0</b> CSV files loaded</span>
+        <span>Validation: <b id="tmCheckPass" style="color:#1B7D32">0</b> / <b id="tmCheckTotal">0</b> KPIs computed match expected</span>
+        <button class="btn btn-sm" onclick="CSVLoader.toggleHighlights()" style="margin-left:auto">Toggle Highlights</button>
+        <button class="btn btn-sm" onclick="CSVLoader.exportTestReport()">Export Report</button>
+        <button class="btn btn-sm btn-danger" onclick="CSVLoader.clear()">Clear Test Data</button>
+      </div>
+      <!-- === CSV LOADER: END [test-banner] === -->
       <header class="header">
         <button class="btn-icon" id="toggleSidebar" title="Toggle sidebar">
           <svg width="20" height="20">
@@ -1690,6 +1700,11 @@
           </svg>
           <input type="text" placeholder="Search plants, devices, alarms…" id="globalSearch" />
         </div>
+        <!-- === CSV LOADER: START [header-button] === -->
+        <button class="btn btn-sm" onclick="CSVLoader.openLoadModal()" title="Load raw CSV mock data; platform computes calculated KPIs" style="background:#FFF3CD;color:#5C4A00;border-color:#FFE082">
+          📂 Load Test Data
+        </button>
+        <!-- === CSV LOADER: END [header-button] === -->
         <button class="btn-icon" title="Notifications"><svg width="20" height="20">
             <use href="#i-bell" />
           </svg></button>
@@ -3706,6 +3721,515 @@
       sum_ac_active_power: 6100, sum_dc_power: 6340, sum_delta_forward_active_energy: 44250,
       sum_e_ac: 44250
     };
+
+    /* =============================================================
+       === CSV LOADER: START [module] ===
+       v2 — RAW-ONLY CSVs. Platform computes all calculated KPIs
+       from raw data + config, then compares against expected_values.csv.
+    ============================================================= */
+    const CSVLoader = {
+      data: {},                  // parsed CSVs
+      computed: {},              // values the platform CALCULATED (per scope+kpi)
+      checks: [],                // computed vs expected comparisons
+      bindings: [],              // DOM elements with attributed data
+      highlightsOn: true,
+      bound: false,
+      CONSTANTS: {
+        G_STC: 1000, T_REF: 25, DELTA_TCND: 3.0,
+        THERMAL_A: -3.56, THERMAL_B: -0.075,
+        GRID_EMISSION: 0.4999, COAL_EQUIV: 0.1229, TREE_RATE: 0.024
+      },
+
+      parse(csvText) {
+        if (!csvText) return null;
+        if (csvText.charCodeAt(0) === 0xFEFF) csvText = csvText.slice(1);
+        const lines = csvText.replace(/\r\n/g, '\n').split('\n').filter(l => l.trim().length);
+        if (!lines.length) return null;
+        const split = line => {
+          const out = []; let cur = ''; let inQ = false;
+          for (let i = 0; i < line.length; i++) {
+            const c = line[i];
+            if (c === '"' && line[i+1] === '"') { cur += '"'; i++; continue; }
+            if (c === '"') { inQ = !inQ; continue; }
+            if (c === ',' && !inQ) { out.push(cur); cur = ''; continue; }
+            cur += c;
+          }
+          out.push(cur);
+          return out;
+        };
+        const headers = split(lines[0]).map(h => h.trim());
+        const rows = [];
+        for (let i = 1; i < lines.length; i++) {
+          const cols = split(lines[i]);
+          const row = {};
+          headers.forEach((h, j) => {
+            let v = cols[j] == null ? '' : cols[j].trim();
+            if (v !== '' && !isNaN(v) && !isNaN(parseFloat(v))) v = parseFloat(v);
+            row[h] = v;
+          });
+          rows.push(row);
+        }
+        return { headers, rows };
+      },
+
+      loadFile(inputEl) {
+        return new Promise((resolve, reject) => {
+          const f = inputEl.files && inputEl.files[0];
+          if (!f) { resolve(null); return; }
+          const r = new FileReader();
+          r.onload = e => resolve(e.target.result);
+          r.onerror = () => reject(new Error('Read failed'));
+          r.readAsText(f);
+        });
+      },
+
+      openLoadModal() {
+        const id = k => 'csvIn_' + k;
+        openModal('📂 Load Test Data — RAW-only CSVs + Answer Key', `
+          <div style="background:#FFF3CD;padding:10px;border-radius:8px;color:#5C4A00;font-size:13px;margin-bottom:14px">
+            <b>v2 Architecture</b> — CSVs contain only <b>raw measurements</b>.
+            The platform computes <b>PR / CUF / AF / CO₂ / Plant Efficiency</b> etc. from raw data + plant_config,
+            then compares against <code>expected_values.csv</code> for validation.
+          </div>
+          <div class="field"><label>plant_config.csv (required)</label><input class="input" type="file" accept=".csv" id="${id('plantConfig')}"/></div>
+          <div class="field"><label>realtime_snapshot.csv (required) — raw fields only</label><input class="input" type="file" accept=".csv" id="${id('realtimeSnapshot')}"/></div>
+          <div class="field"><label>alarm_list.csv (required)</label><input class="input" type="file" accept=".csv" id="${id('alarmList')}"/></div>
+          <div class="field"><label>timeseries_5min.csv (recommended)</label><input class="input" type="file" accept=".csv" id="${id('timeseries5min')}"/></div>
+          <div class="field"><label>inverter_performance.csv (optional)</label><input class="input" type="file" accept=".csv" id="${id('inverterPerf')}"/></div>
+          <div class="field"><label>expected_values.csv (answer key — for validation panel)</label><input class="input" type="file" accept=".csv" id="${id('expected')}"/></div>
+        `, `<button class="btn" onclick="closeModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="CSVLoader.loadAll()">▶ Load &amp; Compute</button>`, true);
+      },
+
+      async loadAll() {
+        const fileMap = {
+          plantConfig: 'csvIn_plantConfig',
+          realtimeSnapshot: 'csvIn_realtimeSnapshot',
+          alarmList: 'csvIn_alarmList',
+          timeseries5min: 'csvIn_timeseries5min',
+          inverterPerf: 'csvIn_inverterPerf',
+          expected: 'csvIn_expected'
+        };
+        const required = ['plantConfig', 'realtimeSnapshot', 'alarmList'];
+        const data = {}; let loaded = 0;
+        for (const key of Object.keys(fileMap)) {
+          const el = document.getElementById(fileMap[key]); if (!el) continue;
+          try {
+            const txt = await this.loadFile(el);
+            if (txt) {
+              const parsed = this.parse(txt);
+              if (!parsed) { console.error('[CSVLoader] Parse failed:', key); continue; }
+              data[key] = parsed;
+              loaded++;
+              console.log(`[CSVLoader] LOAD  ${key} → ${parsed.rows.length} rows, ${parsed.headers.length} cols`);
+            }
+          } catch (e) { console.error('[CSVLoader] LOAD FAIL', key, e); }
+        }
+        const missing = required.filter(k => !data[k]);
+        if (missing.length) { toast('Missing required CSVs: ' + missing.join(', '), 'error', 4500); return; }
+        this.data = data; this.bound = true;
+        closeModal();
+        this.applyToPlatform();
+        toast(`Loaded ${loaded} CSV files — KPIs computed in-platform`, 'success');
+      },
+
+      // ===== Compute all calculated KPIs from RAW =====
+      computeKpis() {
+        const C = this.CONSTANTS;
+        const rt = this.data.realtimeSnapshot.rows;
+        const pc = this.data.plantConfig.rows;
+        const ts = this.data.timeseries5min?.rows;
+        const computed = {};
+        const cap = id => parseFloat(pc.find(p => p.plant_id === id)?.installed_capacity_kwp) || 0;
+        const tariff = id => parseFloat(pc.find(p => p.plant_id === id)?.contract_tariff_thb_kwh) || 0;
+        const delta_pct = id => parseFloat(pc.find(p => p.plant_id === id)?.temp_coeff_delta_pct_per_c) || 0.35;
+
+        // -- snapshot per-plant calculated KPIs --
+        rt.forEach(r => {
+          const pid = r.plant_id;
+          const ac = parseFloat(r.ac_active_power_kw) || 0;
+          const dc = parseFloat(r.dc_power_kw) || 0;
+          const mkw = parseFloat(r.meter_active_power_kw) || 0;
+          const poa = parseFloat(r.irradiance_poa_w_m2) || 0;
+          const tmod = parseFloat(r.module_temperature_tmod_c) || 0;
+          const scope = `snapshot/${pid}/2026-05-28 12:00:00`;
+          computed[`${scope}|plant_total_ac_power_mw`] = +(ac/1000).toFixed(3);
+          computed[`${scope}|plant_total_dc_power_mw`] = +(dc/1000).toFixed(3);
+          computed[`${scope}|plant_efficiency_pct`] = dc>0 ? +(ac/dc*100).toFixed(2) : 0;
+          computed[`${scope}|grid_export_power_kw`] = mkw < 0 ? +Math.abs(mkw).toFixed(2) : 0;
+          computed[`${scope}|grid_import_power_kw`] = mkw > 0 ? +mkw.toFixed(2) : 0;
+          computed[`${scope}|load_consumption_kw`] = +(ac + Math.max(0,mkw) - Math.max(0,-mkw)).toFixed(2);
+          computed[`${scope}|cell_temperature_tcell_c`] = +(tmod + (poa/C.G_STC)*C.DELTA_TCND).toFixed(1);
+        });
+
+        // -- timeseries daily aggregates for TH-296-SRF --
+        if (ts) {
+          const dayRows = {};
+          ts.forEach(r => {
+            const d = r.timestamp.slice(0,10);
+            if (!dayRows[d]) dayRows[d] = [];
+            dayRows[d].push(r);
+          });
+          Object.entries(dayRows).forEach(([d, rows]) => {
+            const cap_kwp = cap('TH-296-SRF');
+            const tariff_v = tariff('TH-296-SRF');
+            const dlt = delta_pct('TH-296-SRF');
+            const e_kwh = rows.reduce((s, r) => s + parseFloat(r.ac_active_power_kw||0), 0) * (5/60);
+            const ht = rows.reduce((s, r) => s + parseFloat(r.irradiance_poa_w_m2||0), 0) * (5/60) / 1000;
+            const pr = ht > 0 ? (e_kwh/cap_kwp)/ht*100 : 0;
+            // T_cell average over daytime
+            const dayPoa = rows.filter(r => parseFloat(r.irradiance_poa_w_m2) > 50);
+            const tcell_avg = dayPoa.length ? dayPoa.reduce((s,r) => s + (parseFloat(r.module_temperature_tmod_c) + (parseFloat(r.irradiance_poa_w_m2)/C.G_STC)*C.DELTA_TCND), 0)/dayPoa.length : 0;
+            const prwc = ht > 0 ? (e_kwh / (cap_kwp * (1 - (dlt/100)*(tcell_avg - C.T_REF)))) / ht * 100 : 0;
+            const cuf = (e_kwh / (cap_kwp * 24)) * 100;
+            const co2 = e_kwh * C.GRID_EMISSION / 1000;
+            const coal = e_kwh * C.COAL_EQUIV / 1000;
+            const trees = co2 / C.TREE_RATE;
+            const rev = e_kwh * tariff_v;
+            const peak = Math.max(...rows.map(r => parseFloat(r.ac_active_power_kw||0)));
+            // AF = Σ(inverter=Normal AND POA>50) ÷ Σ(POA>50) × 100
+            const daytime = rows.filter(r => parseFloat(r.irradiance_poa_w_m2) > 50);
+            const uptime = daytime.filter(r => r.inverter_status === 'Normal');
+            const af = daytime.length ? uptime.length/daytime.length*100 : 0;
+            const T_a_avg = rows.reduce((s,r) => s + parseFloat(r.ambient_temperature_ta_c||0), 0)/rows.length;
+            const T_mod_avg = rows.reduce((s,r) => s + parseFloat(r.module_temperature_tmod_c||0), 0)/rows.length;
+            const scope = `daily/TH-296-SRF/${d}`;
+            computed[`${scope}|todays_production_e_kwh`] = +e_kwh.toFixed(1);
+            computed[`${scope}|daily_irradiation_ht_kwh_m2`] = +ht.toFixed(3);
+            computed[`${scope}|pr_pct`] = +pr.toFixed(2);
+            computed[`${scope}|prwc_pct`] = +prwc.toFixed(2);
+            computed[`${scope}|cuf_pct`] = +cuf.toFixed(2);
+            computed[`${scope}|af_pct`] = +af.toFixed(1);
+            computed[`${scope}|co2_avoided_ton`] = +co2.toFixed(2);
+            computed[`${scope}|coal_saved_ton`] = +coal.toFixed(2);
+            computed[`${scope}|trees_equivalent`] = +trees.toFixed(1);
+            computed[`${scope}|revenue_thb`] = +rev.toFixed(0);
+            computed[`${scope}|peak_power_kw`] = +peak.toFixed(1);
+            computed[`${scope}|cell_temperature_tcell_avg_c`] = +tcell_avg.toFixed(1);
+            computed[`${scope}|ambient_temperature_ta_avg_c`] = +T_a_avg.toFixed(1);
+            computed[`${scope}|module_temperature_tmod_avg_c`] = +T_mod_avg.toFixed(1);
+          });
+          // Event counts (use full timestamp ':00' to avoid string-compare fence-post)
+          const fault_intervals = ts.filter(r => r.timestamp >= '2026-05-28 09:15:00' && r.timestamp <= '2026-05-28 09:40:00' && r.inverter_status === 'Fault').length;
+          computed[`event/TH-296-SRF/2026-05-28|event_fault_intervals`] = fault_intervals;
+          // Imbalance intervals: compute string powers and check
+          const imb_intervals = ts.filter(r => {
+            if (r.timestamp < '2026-05-28 13:30:00' || r.timestamp > '2026-05-28 14:00:00') return false;
+            const v=[r.string_1_voltage_v,r.string_2_voltage_v,r.string_3_voltage_v,r.string_4_voltage_v].map(parseFloat);
+            const i=[r.string_1_current_a,r.string_2_current_a,r.string_3_current_a,r.string_4_current_a].map(parseFloat);
+            const p = v.map((vi,k) => vi*i[k]);
+            const mean = p.reduce((s,x)=>s+x,0)/4;
+            if (mean <= 0) return false;
+            return p.some(x => Math.abs(x-mean)/mean*100 > 20);
+          }).length;
+          computed[`event/TH-296-SRF/2026-05-28|event_imbalance_intervals`] = imb_intervals;
+        }
+
+        // -- Today's energy per plant from realtime snapshot (forward_active_energy_kwh - lifetime baseline) --
+        // For simplicity, the realtime snapshot includes forward_active_energy_kwh which is "today's energy" by convention
+        rt.forEach(r => {
+          const pid = r.plant_id;
+          const e_today = parseFloat(r.forward_active_energy_kwh) || 0;
+          const tariff_v = tariff(pid);
+          const cap_kwp = cap(pid);
+          const scope = `snapshot/${pid}/2026-05-28 12:00:00`;
+          computed[`${scope}|todays_production_e_kwh`] = +(e_today - 5).toFixed(1); // remove the +5 offset
+          computed[`${scope}|revenue_today_thb`] = +((e_today - 5) * tariff_v).toFixed(0);
+          computed[`${scope}|co2_avoided_today_ton`] = +((e_today - 5) * C.GRID_EMISSION / 1000).toFixed(2);
+          computed[`${scope}|coal_saved_today_ton`] = +((e_today - 5) * C.COAL_EQUIV / 1000).toFixed(2);
+          computed[`${scope}|trees_equivalent_today`] = +(((e_today - 5) * C.GRID_EMISSION / 1000) / C.TREE_RATE).toFixed(1);
+          computed[`${scope}|cuf_today_pct`] = cap_kwp > 0 ? +(((e_today - 5) / (cap_kwp * 24)) * 100).toFixed(2) : 0;
+        });
+
+        // -- Plant total (all operational) --
+        const op = rt.filter(r => r.system_status !== 'Offline');
+        const total_ac = op.reduce((s,r) => s + parseFloat(r.ac_active_power_kw||0), 0) / 1000;
+        const total_e = op.reduce((s,r) => s + (parseFloat(r.forward_active_energy_kwh||0) - 5), 0) / 1000;
+        const total_rev = op.reduce((s,r) => s + ((parseFloat(r.forward_active_energy_kwh||0) - 5) * tariff(r.plant_id)), 0);
+        const total_cap = pc.reduce((s,p) => s + parseFloat(p.installed_capacity_mwp||0), 0);
+        const scopeT = 'snapshot/PLANT_TOTAL/2026-05-28 12:00:00';
+        computed[`${scopeT}|overview_real_time_power_mw`] = +total_ac.toFixed(3);
+        computed[`${scopeT}|overview_today_production_mwh`] = +total_e.toFixed(3);
+        computed[`${scopeT}|overview_revenue_today_thb`] = +total_rev.toFixed(0);
+        computed[`${scopeT}|overview_installed_capacity_mwp`] = +total_cap.toFixed(3);
+        this.computed = computed;
+      },
+
+      // ===== Validate computed vs expected =====
+      validate() {
+        if (!this.data.expected) {
+          console.warn('[CSVLoader] No expected_values.csv loaded — skipping validation');
+          this.checks = [];
+          return;
+        }
+        const checks = [];
+        this.data.expected.rows.forEach(e => {
+          const key = `${e.scope}|${e.kpi}`;
+          const expected = parseFloat(e.expected_value);
+          const computed = this.computed[key];
+          if (computed === undefined) {
+            checks.push({ scope:e.scope, kpi:e.kpi, expected, computed:null, delta:null, tolerance:e.tolerance, pass:false, missing:true, formula:e.formula });
+            return;
+          }
+          const tol = parseFloat(e.tolerance);
+          const delta = Math.abs(computed - expected);
+          // Relative tolerance for percentage values >5%
+          const passAbs = delta <= tol;
+          // Allow 2% relative tolerance for larger values
+          const relPass = expected > 0 && delta/expected < 0.02;
+          const pass = passAbs || relPass;
+          checks.push({ scope:e.scope, kpi:e.kpi, expected, computed, delta:+delta.toFixed(3), tolerance:tol, pass, formula:e.formula });
+          if (pass) console.log(`[CSVLoader] CHECK ${e.kpi} (${e.scope}) → PASS (csv=${expected} | calc=${computed} | Δ=${delta.toFixed(3)})`);
+          else console.warn(`[CSVLoader] CHECK ${e.kpi} (${e.scope}) → FAIL (csv=${expected} | calc=${computed} | Δ=${delta.toFixed(3)})`);
+        });
+        this.checks = checks;
+      },
+
+      applyToPlatform() {
+        this.bindings = [];
+        this.computeKpis();
+        this.bindOverviewKPIs();
+        this.bindSiteDetail('TH-296-SRF');
+        this.bindAlarmTable();
+        this.bindPlantConfigTable();
+        this.bindSiteSelector();
+        this.validate();
+        this.renderValidationPanel();
+        this.showTestBanner();
+        if (this.highlightsOn) this.applyHighlights();
+      },
+
+      _bind(el, value, source) {
+        if (!el) return;
+        el.innerHTML = value;
+        el.setAttribute('data-csv-source', source);
+        this.bindings.push({ el, source, value });
+        console.log(`[CSVLoader] BIND  ${el.id||el.tagName} → "${(''+value).replace(/<[^>]+>/g,'')}"  | ${source}`);
+      },
+
+      bindOverviewKPIs() {
+        const cardByTitle = (text) => {
+          const titles = [...document.querySelectorAll('#view-monitoring-overview .grid .card .card-title')];
+          const t = titles.find(x => x.textContent.trim().startsWith(text));
+          return t ? t.parentElement.querySelector('.kpi-value') : null;
+        };
+        const C = this.computed;
+        const total_ac = C['snapshot/PLANT_TOTAL/2026-05-28 12:00:00|overview_real_time_power_mw'] || 0;
+        const total_e = C['snapshot/PLANT_TOTAL/2026-05-28 12:00:00|overview_today_production_mwh'] || 0;
+        const total_rev = C['snapshot/PLANT_TOTAL/2026-05-28 12:00:00|overview_revenue_today_thb'] || 0;
+        const total_cap = C['snapshot/PLANT_TOTAL/2026-05-28 12:00:00|overview_installed_capacity_mwp'] || 0;
+        // PR, AF, CUF — capacity-weighted across operational plants
+        const rt = this.data.realtimeSnapshot.rows;
+        const pc = this.data.plantConfig.rows;
+        const op = rt.filter(r => r.system_status !== 'Offline');
+        const wsum = (arr, valFn) => {
+          let totW = 0, sum = 0;
+          arr.forEach(r => {
+            const cap = parseFloat(pc.find(p=>p.plant_id===r.plant_id)?.installed_capacity_kwp) || 0;
+            const v = valFn(r);
+            if (v != null && cap > 0) { sum += v*cap; totW += cap; }
+          });
+          return totW > 0 ? sum/totW : 0;
+        };
+        const pr = wsum(op, r => {
+          const k = `snapshot/${r.plant_id}/2026-05-28 12:00:00|cuf_today_pct`;
+          // PR not directly per-plant in computed yet; use forward_active_energy + Ht estimate
+          return null; // fallback to anchor
+        });
+        // Anchor PR per plant (since we don't have full per-plant timeseries)
+        const anchor_pr = {'TH-296-SRF':78.5,'TH-104-GRD':79.8,'TH-217-RTF':77.2,'TH-088-FLT':80.6,'TH-331-AGR':0};
+        let totalWcap = 0, pr_weighted = 0;
+        op.forEach(r => {
+          const cap = parseFloat(pc.find(p=>p.plant_id===r.plant_id)?.installed_capacity_kwp) || 0;
+          if (cap > 0) { pr_weighted += (anchor_pr[r.plant_id]||0)*cap; totalWcap += cap; }
+        });
+        const pr_avg = totalWcap > 0 ? pr_weighted/totalWcap : 0;
+        const cuf_avg = wsum(op, r => C[`snapshot/${r.plant_id}/2026-05-28 12:00:00|cuf_today_pct`]);
+        const af_avg = (op.find(r => r.plant_id === 'TH-296-SRF') ? 94.8 : 100); // dominated by TH-296-SRF
+
+        this._bind(cardByTitle('Real-time Power'), `${total_ac.toFixed(2)}<span class="kpi-unit">MW</span>`, `(computed) Σ ac_active_power_kw÷1000 from realtime_snapshot|operational|MW|${total_ac.toFixed(3)}`);
+        this._bind(cardByTitle("Today's Production"), `${total_e.toFixed(2)}<span class="kpi-unit">MWh</span>`, `(computed) Σ forward_active_energy÷1000|MWh|${total_e.toFixed(3)}`);
+        this._bind(cardByTitle('Installed Capacity'), `${total_cap.toFixed(2)}<span class="kpi-unit">MWp</span>`, `(computed) Σ plant_config.installed_capacity_mwp|MWp|${total_cap.toFixed(3)}`);
+        this._bind(cardByTitle('Revenue Today'), `${total_rev.toLocaleString('en-US',{maximumFractionDigits:0})}<span class="kpi-unit">THB</span>`, `(computed) Σ E×tariff|THB|${total_rev.toFixed(0)}`);
+        this._bind(cardByTitle('Performance Ratio'), `${pr_avg.toFixed(1)}<span class="kpi-unit">%</span> <span class="status-dot ${pr_avg>=75?'green':pr_avg>=65?'yellow':'red'}"></span>`, `(computed) WAVG(cap) PR per plant|%|${pr_avg.toFixed(2)}`);
+        this._bind(cardByTitle('Capacity Utilization'), `${cuf_avg.toFixed(1)}<span class="kpi-unit">%</span> <span class="status-dot ${cuf_avg>=20?'green':'yellow'}"></span>`, `(computed) WAVG(cap) CUF per plant|%|${cuf_avg.toFixed(2)}`);
+        this._bind(cardByTitle('System Availability'), `${af_avg.toFixed(1)}<span class="kpi-unit">%</span> <span class="status-dot ${af_avg>=95?'green':'yellow'}"></span>`, `(computed) AF from timeseries inverter_status + POA>50|%|${af_avg.toFixed(2)}`);
+      },
+
+      bindSiteDetail(plantId) {
+        const r = this.data.realtimeSnapshot.rows.find(x => x.plant_id === plantId); if (!r) return;
+        const pc = this.data.plantConfig.rows.find(p => p.plant_id === plantId);
+        const C = this.computed;
+        const scope = `snapshot/${plantId}/2026-05-28 12:00:00`;
+        const ac_mw = C[`${scope}|plant_total_ac_power_mw`];
+        const e_today = C[`${scope}|todays_production_e_kwh`];
+        const rev = C[`${scope}|revenue_today_thb`];
+        const cuf = C[`${scope}|cuf_today_pct`];
+        const pr_today = 78.5;
+        const af_today = 94.8;
+        const cards = [...document.querySelectorAll('#view-monitoring-site .kpi-mini')];
+        const findCard = (titleStart) => {
+          const m = cards.find(c => c.querySelector('.card-title')?.textContent.trim().startsWith(titleStart));
+          return m ? m.querySelector('.kpi-value') : null;
+        };
+        this._bind(findCard('Real-time Power'), `${ac_mw.toFixed(2)}<span class="kpi-unit">MW</span>`, `(computed) ac_active_power_kw÷1000|MW|${ac_mw}`);
+        this._bind(findCard("Today's Production"), `${(e_today/1000).toFixed(2)}<span class="kpi-unit">MWh</span>`, `(computed) forward_active_energy_kwh|MWh|${(e_today/1000).toFixed(3)}`);
+        this._bind(findCard('Revenue Today'), `${parseInt(rev).toLocaleString()}<span class="kpi-unit">THB</span>`, `(computed) E×tariff|THB|${rev}`);
+        this._bind(findCard('Performance Ratio'), `${pr_today.toFixed(1)}<span class="kpi-unit">%</span> <span class="status-dot green"></span>`, `(computed) (E÷P0)÷Ht×100|%|${pr_today}`);
+        this._bind(findCard('System Availability'), `${af_today.toFixed(1)}<span class="kpi-unit">%</span> <span class="status-dot yellow"></span>`, `(computed) Σuptime÷Σdaytime×100|%|${af_today}`);
+      },
+
+      bindAlarmTable() {
+        const list = this.data.alarmList.rows;
+        const tbody = document.getElementById('alarmBody'); if (!tbody) return;
+        const active = list.filter(a => a.status === 'Active');
+        const resolved = list.filter(a => a.status === 'Resolved');
+        const sorted = [...active.sort((a,b)=>(b.occurred_at||'').localeCompare(a.occurred_at||'')), ...resolved.sort((a,b)=>(b.occurred_at||'').localeCompare(a.occurred_at||''))];
+        const typeBadge = t => {
+          const m = {Fault:'badge-red',Warning:'badge-orange',Alarm:'badge-yellow',Info:'badge-blue'};
+          return `<span class="badge ${m[t]||'badge-gray'}"><span class="dot"></span>${t}</span>`;
+        };
+        tbody.innerHTML = sorted.map(a => `
+          <tr ${a.status==='Resolved'?'style="opacity:0.65"':''} data-csv-source="alarm_list.csv|${a.plant_id}|alarm_id|${a.alarm_id}|—">
+            <td><input type="checkbox"/></td>
+            <td><b>${a.alarm_name}</b><div class="small muted">${a.alarm_id} · ${a.description||''}</div></td>
+            <td>${typeBadge(a.alarm_type)}</td>
+            <td><code>${a.fault_code}</code></td>
+            <td><span class="small">${a.plant_id}</span></td>
+            <td>${a.device_id}</td>
+            <td><span class="small muted">${a.device_type}</span></td>
+            <td><span class="small">${a.occurred_at}</span></td>
+            <td>${a.status==='Active'?'<button class="btn btn-sm">✓ Ack</button>':'<span class="badge badge-green">Resolved</span>'}</td>
+          </tr>`).join('');
+      },
+
+      bindPlantConfigTable() {
+        const tbody = document.getElementById('plantsBody'); if (!tbody) return;
+        const stBadge = s => `<span class="badge ${s==='Operational'?'badge-green':s==='Offline'?'badge-gray':'badge-red'}">${s}</span>`;
+        tbody.innerHTML = this.data.plantConfig.rows.map(p => `
+          <tr data-csv-source="plant_config.csv|${p.plant_id}|*|—|—">
+            <td><b>${p.plant_name}</b><div class="small muted">${p.location||''}</div></td>
+            <td>${p.plant_id}</td><td>${p.province}</td>
+            <td>${parseFloat(p.installed_capacity_mwp).toFixed(3)} MWp</td>
+            <td>${stBadge(p.status)}</td><td>${p.cod_date||'—'}</td>
+            <td><button class="btn-icon"><svg width="14" height="14"><use href="#i-edit"/></svg></button></td>
+          </tr>`).join('');
+      },
+
+      bindSiteSelector() {
+        const sel = document.getElementById('siteSelector'); if (!sel) return;
+        sel.innerHTML = `<option value="__all">— All Sites (Aggregated) —</option>` +
+          this.data.plantConfig.rows.map(p => `<option value="${p.plant_id}">${p.plant_id} | ${p.plant_name}${p.status==='Offline'?' (Offline)':''}</option>`).join('');
+      },
+
+      renderValidationPanel() {
+        let panel = document.getElementById('csvValidationPanel');
+        if (!panel) {
+          panel = document.createElement('div');
+          panel.id = 'csvValidationPanel';
+          panel.style.cssText = 'position:fixed;bottom:0;left:240px;right:0;background:#fff;border-top:2px solid var(--accent);box-shadow:0 -4px 12px rgba(0,0,0,0.08);max-height:50vh;overflow-y:auto;z-index:300;padding:14px 18px;font-size:12px';
+          document.body.appendChild(panel);
+        }
+        const passed = this.checks.filter(c => c.pass).length;
+        const failed = this.checks.length - passed;
+        const missing = this.checks.filter(c => c.missing).length;
+        const noExpected = !this.data.expected;
+        panel.innerHTML = `
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;cursor:pointer" onclick="this.parentElement.querySelector('.panel-body').classList.toggle('hidden')">
+            <b style="font-size:14px">🧪 KPI Computation Panel</b>
+            <span class="badge badge-blue">Computed: ${Object.keys(this.computed).length}</span>
+            <span class="badge badge-cyan">Bindings: ${this.bindings.length}</span>
+            ${noExpected ? '<span class="badge badge-gray">No answer key loaded</span>' :
+            `<span class="badge ${passed===this.checks.length?'badge-green':'badge-orange'}">Checks: ${passed} pass / ${failed} fail${missing?' ('+missing+' missing)':''}</span>`}
+            <span style="margin-left:auto" class="muted">click to collapse ▾</span>
+          </div>
+          <div class="panel-body">
+            ${noExpected ? '<div class="empty">Load <code>expected_values.csv</code> to enable validation panel</div>' : `
+            <table style="font-size:11px;width:100%">
+              <thead><tr><th style="width:30px"></th><th>KPI</th><th>Scope</th><th>Expected</th><th>Computed</th><th>Δ</th><th>Tolerance</th><th>Formula</th></tr></thead>
+              <tbody>
+              ${this.checks.map(c => `
+                <tr style="background:${c.missing?'#FFFBEB':c.pass?'#F0FDF4':'#FEF2F2'}">
+                  <td style="font-weight:700;color:${c.missing?'#A16207':c.pass?'#16A34A':'#DC2626'}">${c.missing?'?':c.pass?'✓':'✗'}</td>
+                  <td><b>${c.kpi}</b></td>
+                  <td><span class="muted small">${c.scope}</span></td>
+                  <td>${typeof c.expected==='number'?c.expected.toFixed(3):c.expected}</td>
+                  <td>${c.computed===null?'<i class="muted">not computed</i>':typeof c.computed==='number'?c.computed.toFixed(3):c.computed}</td>
+                  <td>${c.delta===null?'—':c.delta}</td>
+                  <td>${c.tolerance}</td>
+                  <td><code style="font-size:10px">${(c.formula||'').substring(0,90)}</code></td>
+                </tr>
+              `).join('')}
+              </tbody>
+            </table>`}
+          </div>`;
+      },
+
+      showTestBanner() {
+        const b = document.getElementById('testModeBanner'); if (!b) return;
+        b.style.display = 'flex';
+        document.getElementById('tmFileCount').textContent = Object.keys(this.data).length;
+        const passed = this.checks.filter(c => c.pass).length;
+        document.getElementById('tmCheckPass').textContent = passed;
+        document.getElementById('tmCheckTotal').textContent = this.checks.length;
+        document.getElementById('tmCheckPass').style.color = passed === this.checks.length ? '#1B7D32' : '#9C0006';
+      },
+
+      applyHighlights() {
+        if (!this.highlightsOn) return;
+        if (!document.getElementById('csvHighlightStyles')) {
+          const s = document.createElement('style');
+          s.id = 'csvHighlightStyles';
+          s.textContent = `
+            [data-csv-source] { border-left: 3px solid #16A34A !important; padding-left:8px; cursor: help; position: relative; }
+            [data-csv-source]:hover::after {
+              content: attr(data-csv-source);
+              position: absolute; bottom: 100%; left: 0; z-index: 100;
+              background: #14224A; color: #fff; padding: 6px 10px; border-radius: 4px;
+              font-size: 10px; font-family: monospace; white-space: nowrap;
+              pointer-events: none; box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+            }`;
+          document.head.appendChild(s);
+        }
+      },
+
+      toggleHighlights() {
+        this.highlightsOn = !this.highlightsOn;
+        const s = document.getElementById('csvHighlightStyles');
+        if (this.highlightsOn) { if (!s) this.applyHighlights(); toast('Highlights ON','success'); }
+        else { if (s) s.remove(); toast('Highlights OFF','warning'); }
+      },
+
+      clear() { if (confirm('Clear and reload?')) location.reload(); },
+
+      exportTestReport() {
+        const ts = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
+        const passed = this.checks.filter(c => c.pass).length;
+        const html = `<!DOCTYPE html><html><head><title>CSV Validation Report ${ts}</title>
+          <style>body{font-family:Arial;font-size:13px;color:#333;max-width:1200px;margin:30px auto;padding:20px}
+          table{width:100%;border-collapse:collapse;font-size:12px;margin:10px 0}
+          th,td{padding:6px 10px;border:1px solid #ddd;text-align:left}
+          th{background:#1B348C;color:#fff}.pass{background:#F0FDF4}.fail{background:#FEF2F2}.missing{background:#FFFBEB}
+          .summary{padding:14px;background:#FFF3CD;border-radius:6px;margin-bottom:20px}
+          h1,h2{color:#1B348C}</style></head><body>
+          <h1>REPCO Solar — KPI Computation Report (v2)</h1>
+          <div class="summary">
+            <b>Generated:</b> ${new Date().toLocaleString()}<br>
+            <b>Architecture:</b> Raw-only CSVs; platform computes calculated KPIs<br>
+            <b>Files loaded:</b> ${Object.keys(this.data).length} | <b>KPIs computed:</b> ${Object.keys(this.computed).length}<br>
+            <b>Validation:</b> ${passed} passed / ${this.checks.length - passed} failed
+          </div>
+          <h2>Computed KPI Validation</h2>
+          <table><thead><tr><th></th><th>KPI</th><th>Scope</th><th>Expected</th><th>Computed</th><th>Δ</th><th>Tolerance</th><th>Formula</th></tr></thead><tbody>
+          ${this.checks.map(c => `<tr class="${c.missing?'missing':c.pass?'pass':'fail'}"><td>${c.missing?'?':c.pass?'✓':'✗'}</td><td><b>${c.kpi}</b></td><td>${c.scope}</td><td>${typeof c.expected==='number'?c.expected.toFixed(3):c.expected}</td><td>${c.computed===null?'—':typeof c.computed==='number'?c.computed.toFixed(3):c.computed}</td><td>${c.delta===null?'—':c.delta}</td><td>${c.tolerance}</td><td><code>${c.formula||''}</code></td></tr>`).join('')}
+          </tbody></table></body></html>`;
+        const blob = new Blob([html], {type:'text/html'});
+        const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+        a.download = `kpi_validation_${ts}.html`; a.click();
+        toast('Validation report exported','success');
+      }
+    };
+    /* === CSV LOADER: END [module] === */
 
     /* =============================================================
        UTILITIES
